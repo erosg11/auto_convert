@@ -15,7 +15,6 @@ FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
 
 FORMATS = {
     "MP4 (H.264/AAC)": (".mp4", ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
-
     "MP4 (H.265/HEVC)": (".mp4", ["-c:v", "libx265", "-preset", "medium", "-c:a", "aac"]),
     "MKV (Cópia Direta)": (".mkv", ["-c", "copy"]),
     "WEBM (VP9/Opus)": (".webm", ["-c:v", "libvpx-vp9", "-c:a", "libopus"]),
@@ -29,13 +28,14 @@ class VideoConverterApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Conversor de Vídeo")
-        self.root.geometry("600x320")
+        self.root.geometry("600x550")
         self.root.resizable(False, False)
 
-        self.input_file_path = tk.StringVar()
+        self.file_list = []
         self.selected_format = tk.StringVar()
         self.last_saved_format = ""
         self.conversion_thread = None
+        self.conversion_progress = (0, 0, "") # (current, total, filename)
 
         self.has_nvenc_support = False
 
@@ -44,7 +44,6 @@ class VideoConverterApp:
             return
 
         self.detect_gpu_support()
-
         self.setup_ui()
         self.load_last_format()
 
@@ -52,36 +51,52 @@ class VideoConverterApp:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Frame de entrada com Listbox
+        input_frame = ttk.LabelFrame(main_frame, text="Arquivos para Converter")
+        input_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        input_frame = ttk.LabelFrame(main_frame, text="Arquivo de Entrada")
-        input_frame.pack(fill=tk.X, padx=5, pady=5)
+        listbox_frame = ttk.Frame(input_frame)
+        listbox_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        self.entry_input = ttk.Entry(input_frame, textvariable=self.input_file_path, width=50)
-        self.entry_input.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=5)
+        self.listbox = tk.Listbox(listbox_frame, selectmode=tk.EXTENDED)
+        self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.btn_browse = ttk.Button(input_frame, text="Procurar...", command=self.browse_file)
-        self.btn_browse.pack(side=tk.LEFT, padx=5, pady=5)
+        scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.listbox.config(yscrollcommand=scrollbar.set)
 
+        button_frame = ttk.Frame(input_frame)
+        button_frame.pack(fill=tk.X, padx=5, pady=5)
 
+        self.btn_browse = ttk.Button(button_frame, text="Adicionar Arquivos...", command=self.browse_files)
+        self.btn_browse.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
+
+        self.btn_remove = ttk.Button(button_frame, text="Remover Selecionados", command=self.remove_selected_files)
+        self.btn_remove.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+
+        # Frame de formato
         format_frame = ttk.LabelFrame(main_frame, text="Formato de Saída")
-        format_frame.pack(fill=tk.X, padx=5, pady=10)
+        format_frame.pack(fill=tk.X, padx=5, pady=5)
 
         self.combo_format = ttk.Combobox(format_frame, textvariable=self.selected_format, state="readonly", height=10)
         self.combo_format['values'] = list(FORMATS.keys())
         self.combo_format.pack(fill=tk.X, padx=5, pady=5)
         self.combo_format.bind("<<ComboboxSelected>>", self.format_changed)
 
-
+        # Frame de controle
         control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, padx=5, pady=10)
+        control_frame.pack(fill=tk.X, padx=5, pady=5)
 
         self.btn_convert = ttk.Button(control_frame, text="Converter", command=self.start_conversion)
-        self.btn_convert.pack(fill=tk.X, expand=True, pady=5)
+        self.btn_convert.pack(fill=tk.X, expand=True, pady=2)
 
-        self.progress_bar = ttk.Progressbar(main_frame, mode='indeterminate')
+        self.progress_label = ttk.Label(main_frame, text="")
+        self.progress_label.pack(fill=tk.X, padx=5, pady=(5, 0))
+
+        self.progress_bar = ttk.Progressbar(main_frame, mode='determinate')
         self.progress_bar.pack(fill=tk.X, padx=5, pady=5)
 
-        self.status_label = ttk.Label(main_frame, text="Pronto para converter.")
+        self.status_label = ttk.Label(main_frame, text="Selecione os arquivos para conversão.")
         self.status_label.pack(fill=tk.X, padx=5, pady=5)
 
         gpu_status = "GPU NVIDIA (NVENC) detectada!" if self.has_nvenc_support else "GPU NVIDIA (NVENC) não detectada."
@@ -92,7 +107,6 @@ class VideoConverterApp:
         self.license.pack(fill=tk.X, padx=0, pady=2)
 
     def check_ffmpeg(self):
-        """Verifica se o ffmpeg está no PATH do sistema."""
         if shutil.which("ffmpeg"):
             return True
         else:
@@ -102,33 +116,39 @@ class VideoConverterApp:
             return False
 
     def detect_gpu_support(self):
-        """Verifica silenciosamente se o ffmpeg tem encoders NVENC."""
         try:
-            startupinfo = None
-            if sys.platform == "win32":
-                startupinfo = subprocess.STARTUPINFO()
+            startupinfo = subprocess.STARTUPINFO() if sys.platform == "win32" else None
+            if startupinfo:
                 startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            result = subprocess.run(
-                ["ffmpeg", "-encoders"],
-                capture_output=True,
-                text=True,
-                check=True,
-                startupinfo=startupinfo,
-                encoding='utf-8'
-            )
-
+            result = subprocess.run(["ffmpeg", "-encoders"], capture_output=True, text=True, check=True,
+                                    startupinfo=startupinfo, encoding='utf-8')
             output = result.stdout + result.stderr
-            if 'hevc_nvenc' in output and 'h264_nvenc' in output:
-                self.has_nvenc_support = True
+            self.has_nvenc_support = 'hevc_nvenc' in output and 'h264_nvenc' in output
         except (subprocess.CalledProcessError, FileNotFoundError):
             self.has_nvenc_support = False
 
-    def browse_file(self):
-        file_path = filedialog.askopenfilename(title="Selecione um arquivo de vídeo", filetypes=(
-            ("Arquivos de Vídeo", "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv"), ("Todos os arquivos", "*.*")))
-        if file_path:
-            self.input_file_path.set(file_path)
+    def browse_files(self):
+        file_paths = filedialog.askopenfilenames(title="Selecione um ou mais arquivos de vídeo",
+                                                 filetypes=(("Arquivos de Vídeo",
+                                                             "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv"),
+                                                            ("Todos os arquivos", "*.*")))
+        added_count = 0
+        for file_path in file_paths:
+            if file_path not in self.file_list:
+                self.file_list.append(file_path)
+                self.listbox.insert(tk.END, os.path.basename(file_path))
+                added_count += 1
+        
+        if added_count > 0:
+            self.status_label.config(text=f"{len(self.file_list)} arquivo(s) na lista.")
+
+    def remove_selected_files(self):
+        selected_indices = self.listbox.curselection()
+        for i in sorted(selected_indices, reverse=True):
+            self.listbox.delete(i)
+            del self.file_list[i]
+        self.status_label.config(text=f"{len(self.file_list)} arquivo(s) na lista.")
 
     def load_last_format(self):
         try:
@@ -138,7 +158,7 @@ class VideoConverterApp:
                     self.selected_format.set(format_key)
                     self.last_saved_format = format_key
         except FileNotFoundError:
-            pass  # Se não encontrar o arquivo, o próximo if cuidará disso.
+            pass
 
         if not self.selected_format.get():
             self.combo_format.current(0)
@@ -157,23 +177,23 @@ class VideoConverterApp:
 
     def toggle_controls(self, enabled):
         state = "normal" if enabled else "disabled"
-        self.entry_input.config(state=state)
+        self.listbox.config(state=state)
         self.btn_browse.config(state=state)
+        self.btn_remove.config(state=state)
         self.btn_convert.config(state=state)
         self.combo_format.config(state=state)
 
     def start_conversion(self):
-        input_path = self.input_file_path.get()
+        files_to_convert = self.file_list.copy()
         format_key = self.selected_format.get()
 
-        if not input_path or not os.path.exists(input_path):
-            messagebox.showwarning("Aviso", "Por favor, selecione um arquivo de vídeo válido.")
+        if not files_to_convert:
+            messagebox.showwarning("Aviso", "Por favor, adicione arquivos à lista de conversão.")
             return
 
         if not format_key:
             messagebox.showwarning("Aviso", "Por favor, selecione um formato de saída.")
             return
-
 
         is_h264_or_h265 = "H.264" in format_key or "H.265" in format_key
         if is_h264_or_h265 and not self.has_nvenc_support:
@@ -184,70 +204,91 @@ class VideoConverterApp:
             )
 
         self.toggle_controls(enabled=False)
-        self.status_label.config(text=f"Convertendo '{os.path.basename(input_path)}'...")
-        self.progress_bar.start()
+        self.progress_bar['maximum'] = len(files_to_convert)
+        self.progress_bar['value'] = 0
+        self.progress_label.config(text="")
+        self.status_label.config(text="Iniciando conversão...")
 
-        self.conversion_thread = threading.Thread(target=self.convert_video_thread, args=(input_path, format_key),
-                                                  daemon=True)
+        self.conversion_thread = threading.Thread(target=self.convert_video_thread,
+                                                  args=(files_to_convert, format_key), daemon=True)
         self.conversion_thread.start()
         self.check_thread()
 
-    def convert_video_thread(self, input_path_str, format_key):
-        try:
-            input_path = pathlib.Path(input_path_str)
+    def convert_video_thread(self, input_paths, format_key):
+        self.thread_status = (None, None)
+        total_files = len(input_paths)
 
-            extension, options = FORMATS[format_key]
-            options = options.copy()
-            output_filename = f"{input_path.stem}-{datetime.now():%Y%m%d%H%M%S}{extension}"
-            output_path = input_path.with_name(output_filename)
+        for i, input_path_str in enumerate(input_paths):
+            try:
+                self.conversion_progress = (i, total_files, os.path.basename(input_path_str))
+
+                input_path = pathlib.Path(input_path_str)
+                extension, options = FORMATS[format_key]
+                options = options.copy()
+                output_filename = f"{input_path.stem}-{datetime.now():%Y%m%d%H%M%S}{extension}"
+                output_path = input_path.with_name(output_filename)
 
 
-            if "H.264" in format_key:
-                if self.has_nvenc_support:
-                    options = ["-c:v", "h264_nvenc", "-preset", "p7", "-cq", "20", "-pix_fmt", "yuv420p"]
-                else:
-                    options = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+                if "H.264" in format_key:
+                    if self.has_nvenc_support:
+                        options = ["-c:v", "h264_nvenc", "-preset", "p7", "-cq", "20", "-pix_fmt", "yuv420p"]
+                    else:
+                        options = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
 
-            elif "H.265" in format_key:
-                if self.has_nvenc_support:
-                    options = ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "22", "-pix_fmt", "yuv420p"]
-                else:
-                    options = ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
+                elif "H.265" in format_key:
+                    if self.has_nvenc_support:
+                        options = ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "22", "-pix_fmt", "yuv420p"]
+                    else:
+                        options = ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
 
-            command = ["ffmpeg", "-i", str(input_path)] + options + [str(output_path)]
+                command = ["ffmpeg", "-i", str(input_path)] + options + [str(output_path)]
 
-            startupinfo = None
-            if sys.platform == "win32":
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                startupinfo = subprocess.STARTUPINFO() if sys.platform == "win32" else None
+                if startupinfo:
+                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
-            subprocess.run(command, capture_output=True, text=True, check=True, startupinfo=startupinfo,
-                                     encoding='utf-8')
-            self.thread_status = ("success", f"Arquivo salvo como: {output_filename}")
+                subprocess.run(command, capture_output=True, text=True, check=True,
+                                     startupinfo=startupinfo, encoding='utf-8')
+                
+                self.conversion_progress = (i + 1, total_files, os.path.basename(input_path_str))
 
-        except subprocess.CalledProcessError as e:
-            error_message = f"Erro no FFmpeg:\n\n{e.stderr}"
-            print(e.stderr)
-            self.thread_status = ("error", error_message)
-        except Exception as e:
-            self.thread_status = ("error", f"Ocorreu um erro inesperado: {e}")
+            except subprocess.CalledProcessError as e:
+                error_message = f"Erro ao converter '{os.path.basename(input_path_str)}':\n\n{e.stderr}"
+                self.thread_status = ("error", error_message)
+                return
+            except Exception as e:
+                self.thread_status = ("error", f"Ocorreu um erro inesperado: {e}")
+                return
+
+        self.thread_status = ("success", f"{total_files} arquivo(s) convertido(s) com sucesso!")
 
     def check_thread(self):
         if self.conversion_thread.is_alive():
+            current, total, filename = self.conversion_progress
+            if total > 0:
+                self.progress_bar['value'] = current
+                self.progress_label.config(text=f"Progresso: {current} de {total}")
+                if current < total:
+                    self.status_label.config(text=f"Convertendo: {filename}...")
             self.root.after(100, self.check_thread)
         else:
-            self.progress_bar.stop()
             self.toggle_controls(enabled=True)
-
             status, message = self.thread_status
+
             if status == "success":
+                final_value = self.progress_bar['maximum']
+                self.progress_bar['value'] = final_value
+                self.progress_label.config(text=f"Progresso: {final_value} de {final_value}")
                 self.status_label.config(text="Conversão concluída com sucesso!")
                 messagebox.showinfo("Sucesso", message)
-            else:
+            elif status == "error":
                 self.status_label.config(text="A conversão falhou.")
                 messagebox.showerror("Erro de Conversão", message)
 
             self.status_label.config(text="Pronto para converter.")
+            self.progress_label.config(text="")
+            self.progress_bar['value'] = 0
+            self.conversion_progress = (0, 0, "")
 
 
 if __name__ == "__main__":
@@ -255,6 +296,5 @@ if __name__ == "__main__":
     app = VideoConverterApp(root)
     if 'win' in sys.platform:
         from ctypes import windll
-
         windll.shcore.SetProcessDpiAwareness(1)
     root.mainloop()
