@@ -227,8 +227,10 @@ class VideoConverterApp:
         self.btn_browse.config(state=state)
         self.btn_remove.config(state=state)
         self.btn_convert.config(state=state)
+        self.btn_limpa.config(state=state)
         self.combo_format.config(state=state)
         self.combo_scale.config(state=state)
+
 
     def start_conversion(self):
         files_to_convert = self.file_list.copy()
