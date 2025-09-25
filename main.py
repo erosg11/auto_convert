@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
 import subprocess
 import threading
 import pathlib
@@ -9,18 +10,26 @@ import shutil
 import sys
 import os
 
-
 LAST_FORMAT_FILE = "last_format.txt"
 FFMPEG_DOWNLOAD_URL = "https://ffmpeg.org/download.html"
 
 FORMATS = {
-    "MP4 (H.264/AAC)": (".mp4", ["-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
-    "MP4 (H.265/HEVC)": (".mp4", ["-c:v", "libx265", "-preset", "medium", "-c:a", "aac"]),
+    "MP4 (H.264/AAC)": (".mp4", ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]),
+    "MP4 NVENC (H.264/AAC)": (".mp4", ["-c:v", "h264_nvenc", "-preset", "p7", "-cq", "20", "-pix_fmt", "yuv420p"]),
+    "MP4 (H.265/HEVC)": (".mp4", ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]),
+    "MP4 NVENC (H.265/HEVC)": (".mp4", ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "22", "-pix_fmt", "yuv420p"]),
     "MKV (Cópia Direta)": (".mkv", ["-c", "copy"]),
     "WEBM (VP9/Opus)": (".webm", ["-c:v", "libvpx-vp9", "-c:a", "libopus"]),
     "MOV (Apple QuickTime)": (".mov", ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac"]),
     "AVI (MPEG-4/MP3)": (".avi", ["-c:v", "mpeg4", "-c:a", "libmp3lame"]),
     "GIF Animado": (".gif", ["-vf", "fps=15,scale=500:-1:flags=lanczos"]),
+}
+
+SCALES = {
+    'original': [],
+    '1080p': ['-vf', 'scale=-1:1080'],
+    '720p': ['-vf', 'scale=-1:720'],
+    '480p': ['-vf', 'scale=-1:480']
 }
 
 
@@ -33,9 +42,10 @@ class VideoConverterApp:
 
         self.file_list = []
         self.selected_format = tk.StringVar()
+        self.selected_scale = tk.StringVar()
         self.last_saved_format = ""
         self.conversion_thread = None
-        self.conversion_progress = (0, 0, "") # (current, total, filename)
+        self.conversion_progress = (0, 0, "")  # (current, total, filename)
 
         self.has_nvenc_support = False
 
@@ -44,6 +54,11 @@ class VideoConverterApp:
             return
 
         self.detect_gpu_support()
+        if not self.has_nvenc_support:
+            to_del = {k for k in FORMATS.keys() if 'NVENC' in k}
+            for k in to_del:
+                del FORMATS[k]
+
         self.setup_ui()
         self.load_last_format()
 
@@ -60,6 +75,8 @@ class VideoConverterApp:
 
         self.listbox = tk.Listbox(listbox_frame, selectmode=tk.EXTENDED)
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.listbox.drop_target_register(DND_FILES)
+        self.listbox.dnd_bind('<<Drop>>', self.on_drop)
 
         scrollbar = ttk.Scrollbar(listbox_frame, orient=tk.VERTICAL, command=self.listbox.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -72,7 +89,10 @@ class VideoConverterApp:
         self.btn_browse.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 2))
 
         self.btn_remove = ttk.Button(button_frame, text="Remover Selecionados", command=self.remove_selected_files)
-        self.btn_remove.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
+        self.btn_remove.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 2))
+
+        self.btn_limpa = ttk.Button(button_frame, text="Limpa lista", command=self.limpa_lista)
+        self.btn_limpa.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(2, 0))
 
         # Frame de formato
         format_frame = ttk.LabelFrame(main_frame, text="Formato de Saída")
@@ -80,8 +100,13 @@ class VideoConverterApp:
 
         self.combo_format = ttk.Combobox(format_frame, textvariable=self.selected_format, state="readonly", height=10)
         self.combo_format['values'] = list(FORMATS.keys())
-        self.combo_format.pack(fill=tk.X, padx=5, pady=5)
+        self.combo_format.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 2), pady=5)
         self.combo_format.bind("<<ComboboxSelected>>", self.format_changed)
+
+        self.combo_scale = ttk.Combobox(format_frame, textvariable=self.selected_scale, state="readonly", height=10)
+        self.combo_scale['values'] = list(SCALES.keys())
+        self.combo_scale.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(2, 0), pady=5)
+        self.combo_scale.bind("<<ComboboxSelected>>", self.format_changed)
 
         # Frame de controle
         control_frame = ttk.Frame(main_frame)
@@ -105,6 +130,10 @@ class VideoConverterApp:
         self.license = ttk.Label(main_frame, text='Feito por erosg11', anchor="center", foreground='blue')
         self.license.bind('<Button-1>', lambda e: webbrowser.open('https://github.com/erosg11/auto_convert.git'))
         self.license.pack(fill=tk.X, padx=0, pady=2)
+
+    def on_drop(self, event):
+        file_paths = root.tk.splitlist(event.data)
+        self.add_files(file_paths)
 
     def check_ffmpeg(self):
         if shutil.which("ffmpeg"):
@@ -133,44 +162,61 @@ class VideoConverterApp:
                                                  filetypes=(("Arquivos de Vídeo",
                                                              "*.mp4 *.mkv *.avi *.mov *.webm *.flv *.wmv"),
                                                             ("Todos os arquivos", "*.*")))
+        self.add_files(file_paths)
+
+    def add_files(self, file_paths):
         added_count = 0
         for file_path in file_paths:
             if file_path not in self.file_list:
                 self.file_list.append(file_path)
                 self.listbox.insert(tk.END, os.path.basename(file_path))
                 added_count += 1
-        
+
         if added_count > 0:
-            self.status_label.config(text=f"{len(self.file_list)} arquivo(s) na lista.")
+            self.update_status_label()
 
     def remove_selected_files(self):
         selected_indices = self.listbox.curselection()
         for i in sorted(selected_indices, reverse=True):
             self.listbox.delete(i)
             del self.file_list[i]
-        self.status_label.config(text=f"{len(self.file_list)} arquivo(s) na lista.")
+        self.update_status_label()
+
+    def update_status_label(self):
+        list_size = len(self.file_list)
+        self.status_label.config(text=f"{list_size} arquivo{'s' if list_size != 1 else ''} na lista.")
+
+    def limpa_lista(self):
+        self.file_list.clear()
+        self.listbox.delete(0, tk.END)
+        self.update_status_label()
+
 
     def load_last_format(self):
         try:
             with open(LAST_FORMAT_FILE, "r") as f:
-                format_key = f.read().strip()
+                format_key, *scale_key = [x.strip() for x in f.readlines()]
                 if format_key in FORMATS:
                     self.selected_format.set(format_key)
-                    self.last_saved_format = format_key
+                if scale_key and scale_key[0] in SCALES:
+                    self.selected_scale.set(scale_key[0])
+
         except FileNotFoundError:
             pass
 
         if not self.selected_format.get():
             self.combo_format.current(0)
-            self.last_saved_format = self.selected_format.get()
+        if not self.selected_scale.get():
+            self.combo_scale.current(0)
+        self.last_saved_format = self.selected_format.get(), self.selected_scale.get()
 
     def save_last_format(self, format_key):
         with open(LAST_FORMAT_FILE, "w") as f:
-            f.write(format_key)
+            print(*format_key, sep='\n', file=f)
         self.last_saved_format = format_key
 
     def format_changed(self, event):
-        current_format = self.selected_format.get()
+        current_format = self.selected_format.get(), self.selected_scale.get()
         if current_format != self.last_saved_format:
             self.save_last_format(current_format)
             self.status_label.config(text=f"Formato de saída padrão salvo: {current_format}")
@@ -182,6 +228,7 @@ class VideoConverterApp:
         self.btn_remove.config(state=state)
         self.btn_convert.config(state=state)
         self.combo_format.config(state=state)
+        self.combo_scale.config(state=state)
 
     def start_conversion(self):
         files_to_convert = self.file_list.copy()
@@ -228,28 +275,16 @@ class VideoConverterApp:
                 output_filename = f"{input_path.stem}-{datetime.now():%Y%m%d%H%M%S}{extension}"
                 output_path = input_path.with_name(output_filename)
 
-
-                if "H.264" in format_key:
-                    if self.has_nvenc_support:
-                        options = ["-c:v", "h264_nvenc", "-preset", "p7", "-cq", "20", "-pix_fmt", "yuv420p"]
-                    else:
-                        options = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
-
-                elif "H.265" in format_key:
-                    if self.has_nvenc_support:
-                        options = ["-c:v", "hevc_nvenc", "-preset", "p7", "-cq", "22", "-pix_fmt", "yuv420p"]
-                    else:
-                        options = ["-c:v", "libx265", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p"]
-
-                command = ["ffmpeg", "-i", str(input_path)] + options + [str(output_path)]
+                command = (["ffmpeg", "-i", str(input_path)] + options + SCALES[self.selected_scale.get()] +
+                           [str(output_path)])
 
                 startupinfo = subprocess.STARTUPINFO() if sys.platform == "win32" else None
                 if startupinfo:
                     startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
 
                 subprocess.run(command, capture_output=True, text=True, check=True,
-                                     startupinfo=startupinfo, encoding='utf-8')
-                
+                               startupinfo=startupinfo, encoding='utf-8')
+
                 self.conversion_progress = (i + 1, total_files, os.path.basename(input_path_str))
 
             except subprocess.CalledProcessError as e:
@@ -292,9 +327,10 @@ class VideoConverterApp:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     app = VideoConverterApp(root)
     if 'win' in sys.platform:
         from ctypes import windll
+
         windll.shcore.SetProcessDpiAwareness(1)
     root.mainloop()
